@@ -12,6 +12,7 @@ model:
 data:
   train_csv: data/MVSA/splits/train.csv
   val_csv: data/MVSA/splits/valid.csv
+  test_csv: data/MVSA/splits/test.csv
   target: text  
 
 logging:

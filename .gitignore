@@ -1,0 +1,36 @@
+# General OS/editor
+.DS_Store
+
+# Python cache/bytecode
+__pycache__/
+
+
+
+
+
+
+# Notebooks
+.ipynb_checkpoints/
+
+
+
+
+# Logs
+logs/
+*.log
+
+
+# data 
+data/MVSA/
+data/MVSA_Single/
+data/MVSA-multiple.zip
+data/MVSA-Single.zip 
+
+
+outputs/
+
+*.zip
+*.pt 
+*.safetensors
+
+literature/

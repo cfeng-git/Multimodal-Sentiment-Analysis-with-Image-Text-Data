@@ -1,0 +1,19 @@
+training:
+  batch_size: 32
+  num_epochs: 1
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  seed: 42
+
+model:
+  model_name: bert-base-uncased
+  max_length: 256
+
+data:
+  train_csv: data/MVSA/splits/train.csv
+  val_csv: data/MVSA/splits/valid.csv
+  target: text  
+
+logging:
+  output_dir: outputs/
+  save_every: 1

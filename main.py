@@ -7,6 +7,7 @@ import numpy as np
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
+    AutoModel,
     AutoModelForSequenceClassification,
     TrainingArguments,
     Trainer,
@@ -74,9 +75,9 @@ def main():
 
     # get parameters related to model
     model_section = config["model"]
-    model_name = model_section.get("model_name")  # text-only
-    text_model = model_section.get("text_model")  # multimodal
-    vision_model = model_section.get("vision_model")  # multimodal
+    model_name = model_section.get("model_name")  # model used to predict sentiment
+    text_model = model_section.get("text_model")  # model used to process text data and generate tokens
+    vision_model = model_section.get("vision_model")  # model used to process image data
     max_length = model_section.get("max_length", 128)
 
     # get parameters related to data
@@ -84,17 +85,40 @@ def main():
     train_csv = data_cfg["train_csv"]
     val_csv = data_cfg["val_csv"]
     test_csv = data_cfg.get("test_csv")
-    label_column = data_cfg.get("label_column")  # optional
-    target = data_cfg.get("target", "text")  # only used if label_column is not provided
+    target = data_cfg.get("target", "text")  # the label we want to predict, could be text (default), image, or combined
 
     # get parameters related logging: 
     out_cfg = config.get("logging", {})
     output_dir = out_cfg.get("output_dir", str((PROJECT_ROOT / "outputs" / "checkpoints" / "text").resolve()))
     
-    # Branch: text-only vs multimodal. Multimodal path can use a custom Dataset.
-    is_multimodal = text_model is not None and vision_model is not None and model_name is None
+    # set random seed 
+    set_seed(seed)
 
-    if is_multimodal:
+    # load dataset 
+    ds = load_dataset(
+            "csv", data_files={"train": train_csv, "validation": val_csv, **({"test": test_csv} if test_csv else {})}
+        )
+    
+    # Decide which label column to use
+    target_map = {
+        "text": "text_label", 
+        "image": "image_label", 
+        "combined": "combined_label"
+        }
+    label_column = target_map.get(target, target)
+
+    if label_column not in ds["train"].column_names:
+        raise KeyError(f"Label column '{label_column}' not found in CSV columns: {ds['train'].column_names}")
+
+    
+
+
+
+    # different training loops for text only, image only, or combined 
+    # for prediction based on text or image, use Hugging Face modules to finetune the model
+
+    
+    if target == 'combined':
         raise NotImplementedError(
             "Multimodal training from main.py not implemented yet. "
             "Provide only 'model_name' in config to run text-only training, "
@@ -102,86 +126,80 @@ def main():
         )
 
 
-    # Text-only training using Hugging Face datasets/transformers
-    
+    # training loop for text only models. 
+    if target == 'text': 
+        ds = ds.map(load_text_from_path)
+        text_source_col = "text"
 
-    set_seed(seed)
+        # Build consistent label mapping from train split
+        labels = sorted(set(ds["train"][label_column]))
+        label2id = {l: i for i, l in enumerate(labels)}
+        id2label = {i: l for l, i in label2id.items()}
 
-    ds = load_dataset(
-        "csv", data_files={"train": train_csv, "validation": val_csv, **({"test": test_csv} if test_csv else {})}
-    )
+        ds = ds.map(build_add_label_id(label_column, label2id))
+        tok = AutoTokenizer.from_pretrained(model_name)
 
-    # Decide which label column to use
-    if label_column is None:
-        target_map = {"text": "text_label", "image": "image_label", "combined": "combined_label"}
-        label_column = target_map.get(target, target)
+        def preprocess(batch):
+            return tok(batch[text_source_col], truncation=True, padding="max_length", max_length=max_length)
 
-    if label_column not in ds["train"].column_names:
-        raise KeyError(f"Label column '{label_column}' not found in CSV columns: {ds['train'].column_names}")
+        ds = ds.map(preprocess, batched=True)
 
-    # Always read raw text from file paths under 'text_path'
-    if "text_path" not in ds["train"].column_names:
-        raise KeyError("CSV must contain a 'text_path' column with file paths to text files.")
+        # Keep only the required columns for the model
+        keep = {"input_ids", "attention_mask", "labels"}
+        if "token_type_ids" in ds["train"].features:
+            keep.add("token_type_ids")
+        ds = ds.remove_columns([c for c in ds["train"].column_names if c not in keep])
 
-    ds = ds.map(load_text_from_path)
-    text_source_col = "text"
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
+        )
 
-    # Build consistent label mapping from train split
-    labels = sorted(set(ds["train"][label_column]))
-    label2id = {l: i for i, l in enumerate(labels)}
-    id2label = {i: l for l, i in label2id.items()}
+        # Freeze everything first
+        for p in model.parameters():
+            p.requires_grad = False
 
-    ds = ds.map(build_add_label_id(label_column, label2id))
+        # Unfreeze classifier head
+        for p in model.classifier.parameters():
+            p.requires_grad = True
 
-    tok = AutoTokenizer.from_pretrained(model_name)
+        # Optionally unfreeze last N encoder layers
+        # N = 2
+        # for layer in model.bert.encoder.layer[-N:]:
+        #     for p in layer.parameters():
+        #         p.requires_grad = True
 
-    def preprocess(batch):
-        return tok(batch[text_source_col], truncation=True, padding="max_length", max_length=max_length)
+        compute_metrics = build_compute_metrics(average="macro")
 
-    ds = ds.map(preprocess, batched=True)
+        args = TrainingArguments(
+            output_dir=output_dir,
+            learning_rate=lr,
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=batch_size,
+            num_train_epochs=num_epochs,
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            load_best_model_at_end=True,
+            metric_for_best_model="f1",
+            weight_decay=weight_decay,
+            report_to="none",
+            seed=seed,
+        )
 
-    # Keep only the required columns for the model
-    keep = {"input_ids", "attention_mask", "labels"}
-    if "token_type_ids" in ds["train"].features:
-        keep.add("token_type_ids")
-    ds = ds.remove_columns([c for c in ds["train"].column_names if c not in keep])
+        trainer = Trainer(
+            model=model,
+            args=args,
+            train_dataset=ds["train"],
+            eval_dataset=ds.get("validation"),
+            tokenizer=tok,
+            compute_metrics=compute_metrics,
+        )
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
-    )
+        trainer.train()
 
-    compute_metrics = build_compute_metrics(average="macro")
-
-    args = TrainingArguments(
-        output_dir=output_dir,
-        learning_rate=lr,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        num_train_epochs=num_epochs,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        weight_decay=weight_decay,
-        report_to="none",
-        seed=seed,
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=args,
-        train_dataset=ds["train"],
-        eval_dataset=ds.get("validation"),
-        tokenizer=tok,
-        compute_metrics=compute_metrics,
-    )
-
-    trainer.train()
-
-    # Save label map for inference
-    os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "label_map.json"), "w") as f:
-        json.dump({"label2id": label2id, "id2label": id2label}, f)
+        # Save label map for inference
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "label_map.json"), "w") as f:
+            json.dump({"label2id": label2id, "id2label": id2label}, f)
 
 
 if __name__ == "__main__":

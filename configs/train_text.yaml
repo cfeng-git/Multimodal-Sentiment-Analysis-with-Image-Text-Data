@@ -6,7 +6,7 @@ training:
   seed: 42
 
 model:
-  model_name: bert-base-uncased
+  model_name: vinai/bertweet-base
   max_length: 256
 
 data:

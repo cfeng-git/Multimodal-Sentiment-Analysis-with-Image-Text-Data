@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--out_dir",
-        default=str(BASE_DIR / "MVSA" / "descriptions"),
+        default=str(BASE_DIR / "descriptions"),
         help="Directory where captions.csv and ocr.csv will be written.",
     )
     parser.add_argument("--max_new_tokens", type=int, default=40, help="Max tokens for caption generation.")

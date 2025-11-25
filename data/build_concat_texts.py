@@ -7,15 +7,15 @@ Example:
     python data/build_concat_texts.py \
         --base_dir data/MVSA/splits \
         --splits train,valid,test \
-        --captions_csv data/MVSA/descriptions/captions.csv \
-        --ocr_csv data/MVSA/descriptions/ocr.csv \
+        --captions_csv data/descriptions/captions.csv \
+        --ocr_csv data/descriptions/ocr.csv \
         --out_dir data/MVSA/combined_text
 
     python data/build_concat_texts.py \
         --base_dir data/MVSA/splits \
         --splits train,valid,test \
-        --captions_csv data/MVSA/descriptions/captions.csv \
-        --ocr_csv data/MVSA/descriptions/ocr.csv \
+        --captions_csv data/descriptions/captions.csv \
+        --ocr_csv data/descriptions/ocr.csv \
         --max_caption_chars 150 \
         --max_ocr_chars 150 \
         --out_dir data/MVSA/combined_text

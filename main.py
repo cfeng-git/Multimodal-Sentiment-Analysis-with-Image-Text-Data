@@ -11,6 +11,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     TrainingArguments,
     Trainer,
+    TrainerCallback,
     set_seed,
 )
 from utils.config import load_config, validate_config, merge_config_and_args
@@ -48,6 +49,39 @@ def parse_args():
 
 
 
+class TrainEvalCallback(TrainerCallback):
+    """Evaluate on the training set at the end of each epoch."""
+
+    def __init__(self, train_dataset):
+        self.train_dataset = train_dataset
+        self.trainer = None  # to be set after Trainer is created
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if self.trainer is None:
+            return control
+
+        # 1) Evaluate on the training set
+        train_metrics = self.trainer.evaluate(
+            eval_dataset=self.train_dataset,
+            metric_key_prefix="train",
+        )
+
+        # 2) Evaluate on the validation set (uses trainer.eval_dataset by default)
+        eval_metrics = self.trainer.evaluate(
+            metric_key_prefix="eval",
+        )
+
+        print(f"[Train metrics] epoch={state.epoch}: {train_metrics}")
+        print(f"[Eval metrics]  epoch={state.epoch}: {eval_metrics}")
+        return control
+
+
+class EvalPrintCallback(TrainerCallback):
+    """Print eval metrics when evaluation runs (e.g., end of each epoch)."""
+
+    def on_evaluate(self, args, state, control, metrics, **kwargs):
+        print(f"[Eval metrics] epoch={state.epoch}: {metrics}")
+        return control
 
 
 def main():
@@ -157,16 +191,66 @@ def main():
         # Freeze everything first
         for p in model.parameters():
             p.requires_grad = False
+        
+        # Unfreeze everything
+        for p in model.parameters():
+            p.requires_grad = True
 
         # Unfreeze classifier head
         for p in model.classifier.parameters():
             p.requires_grad = True
 
-        # Optionally unfreeze last N encoder layers
+        # # Optionally unfreeze last N encoder layers across common architectures
+        # def _find_encoder_layers(m):
+        #     # Try common base model attributes
+        #     for attr in [
+        #         "bert",
+        #         "roberta",
+        #         "deberta",
+        #         "deberta_v2",
+        #         "xlm_roberta",
+        #         "longformer",
+        #         "electra",
+        #         "albert",
+        #         "mobilebert",
+        #         "distilbert",
+        #     ]:
+        #         sub = getattr(m, attr, None)
+        #         if sub is None:
+        #             continue
+        #         # Check common encoder containers
+        #         for enc_name, layer_name in [
+        #             ("encoder", "layer"),
+        #             ("encoder", "block"),
+        #             ("encoder", "h"),
+        #             ("transformer", "layer"),
+        #             ("transformer", "h"),
+        #         ]:
+        #             enc = getattr(sub, enc_name, None)
+        #             if enc is None:
+        #                 continue
+        #             layers = getattr(enc, layer_name, None)
+        #             if layers is not None:
+        #                 return layers
+        #     # Fallback: base_model.encoder.layer/block/h
+        #     base = getattr(m, "base_model", None)
+        #     if base is not None:
+        #         enc = getattr(base, "encoder", None)
+        #         if enc is not None:
+        #             for name in ["layer", "block", "h"]:
+        #                 layers = getattr(enc, name, None)
+        #                 if layers is not None:
+        #                     return layers
+        #     return None
+
+        # encoder_layers = _find_encoder_layers(model)
         # N = 2
-        # for layer in model.bert.encoder.layer[-N:]:
-        #     for p in layer.parameters():
-        #         p.requires_grad = True
+        # if encoder_layers is not None:
+        #     for layer in encoder_layers[-N:]:
+        #         for p in layer.parameters():
+        #             p.requires_grad = True
+        # else:
+        #     print("[WARN] Could not locate encoder layers to unfreeze; only classifier is trainable.")
 
         compute_metrics = build_compute_metrics(average="macro")
 
@@ -193,6 +277,9 @@ def main():
             tokenizer=tok,
             compute_metrics=compute_metrics,
         )
+        train_cb = TrainEvalCallback(ds["train"])
+        trainer.add_callback(train_cb)
+        train_cb.trainer = trainer
 
         trainer.train()
 

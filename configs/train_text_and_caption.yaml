@@ -1,0 +1,20 @@
+training:
+  batch_size: 32
+  num_epochs: 4
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  seed: 42
+
+model:
+  model_name: microsoft/deberta-v3-small
+  max_length: 256
+
+data:
+  train_csv: data/MVSA/combined_text/train_combined.csv
+  val_csv: data/MVSA/combined_text/valid_combined.csv
+  test_csv: data/MVSA/combined_text/test_combined.csv
+  target: text  
+
+logging:
+  output_dir: outputs/
+  save_every: 1

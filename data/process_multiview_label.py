@@ -22,10 +22,12 @@ with open(input_file, "r", encoding="utf-8") as f_in, \
     reader = csv.reader(f_in, delimiter="\t")
     header = next(reader)  # ['ID', 'text,image', 'text,image', 'text,image']
 
-    writer = csv.DictWriter(f_out, fieldnames=["id", "text_label", "image_label"])
+    writer = csv.DictWriter(f_out, fieldnames=["id", "text_label", "image_label", "combined_label"])
     writer.writeheader()
 
+    total, dropped = 0, 0
     for row in reader:
+        total += 1
         ex_id = row[0]
         annot_cells = row[1:]  # three annotator columns
 
@@ -45,8 +47,16 @@ with open(input_file, "r", encoding="utf-8") as f_in, \
         final_text = majority_with_tie_rule(text_labels)
         final_image = majority_with_tie_rule(image_labels)
 
+        # Discard examples where majority text and image labels disagree
+        if final_text != final_image:
+            dropped += 1
+            continue
+
         writer.writerow({
             "id": ex_id,
             "text_label": final_text,
-            "image_label": final_image
+            "image_label": final_image,
+            "combined_label": final_text,  # same as text_label
         })
+
+print(f"Wrote {total - dropped} examples to {output_file} (dropped {dropped} due to text/image disagreement)")

@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 from transformers import AutoImageProcessor, AutoTokenizer, set_seed
 
 from data.mvsa_mv import MVSA_MV
@@ -160,6 +160,8 @@ def main():
             optimizer.zero_grad(set_to_none=True)
 
         for batch in iterator:
+            if batch is None:
+                continue
             batch = to_device(batch)
             with torch.set_grad_enabled(train):
                 outputs = model(**batch)
@@ -184,9 +186,15 @@ def main():
         return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
     # DataLoaders
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    def safe_collate(batch):
+        batch = [b for b in batch if b is not None]
+        if not batch:
+            return None
+        return default_collate(batch)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=safe_collate)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=safe_collate)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=safe_collate)
 
     # Optimizer on trainable params only
     optimizer = torch.optim.AdamW(

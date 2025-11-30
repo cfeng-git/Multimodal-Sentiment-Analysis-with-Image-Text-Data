@@ -4,6 +4,7 @@ import torch
 import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset
+import warnings
 
 
 class MVSA_MV(Dataset):
@@ -51,9 +52,13 @@ class MVSA_MV(Dataset):
         if self.target_col in ("image_label", "combined_label"):
             if self.image_processor is None:
                 raise ValueError("Image processor is required for image or combined targets.")
-            img = Image.open(r["image_path"]).convert("RGB")
-            img_enc = self.image_processor(images=img, return_tensors="pt")
-            out["pixel_values"] = img_enc["pixel_values"].squeeze(0)
+            try:
+                img = Image.open(r["image_path"]).convert("RGB")
+                img_enc = self.image_processor(images=img, return_tensors="pt")
+                out["pixel_values"] = img_enc["pixel_values"].squeeze(0)
+            except Exception as e:
+                warnings.warn(f"Skipping image at {r['image_path']} due to error: {e}")
+                return None
 
         out["labels"] = torch.tensor(self.label2id[r[self.target_col]], dtype=torch.long)
         return out

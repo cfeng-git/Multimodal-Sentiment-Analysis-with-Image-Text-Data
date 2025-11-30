@@ -1,31 +1,31 @@
 import argparse
-import os
 from pathlib import Path
-import json
-import numpy as np
 
-from datasets import load_dataset
-from transformers import (
-    AutoTokenizer,
-    AutoModel,
-    AutoModelForSequenceClassification,
-    TrainingArguments,
-    Trainer,
-    set_seed,
-)
-from utils.config import load_config, validate_config, merge_config_and_args
-from utils.data_utils import (
-    load_text_from_path,
-    build_add_label_id,
-    build_compute_metrics,
-)
+import torch
+from torch.utils.data import DataLoader
+from transformers import AutoImageProcessor, AutoTokenizer, set_seed
 
+from data.mvsa_mv import MVSA_MV
+from models.image_only import ImageClassifier
+from models.multimodal import MultimodalClassifier
+from models.text_only import TextClassifier
+from utils.config import load_config, merge_config_and_args, validate_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_SPLIT_DIR = PROJECT_ROOT / "data" / "MVSA" / "splits"
+TRAIN_CSV = DATA_SPLIT_DIR / "train.csv"
+VAL_CSV = DATA_SPLIT_DIR / "valid.csv"
+TEST_CSV = DATA_SPLIT_DIR / "test.csv"
+TEXT_MODEL_ID = "vinai/bertweet-base"
+VISION_MODEL_ID = "google/vit-base-patch16-224"
 
 
 
+
+
+def str2bool(v: str) -> bool:
+    return str(v).lower() in {"1", "true", "t", "yes", "y"}
 
 
 def parse_args():
@@ -43,6 +43,12 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, help="Override LR")
     parser.add_argument("--batch_size", type=int, help="Override batch size")
     parser.add_argument("--num_epochs", type=int, help="Override epochs")
+    parser.add_argument(
+        "--training",
+        type=str2bool,
+        default=True,
+        help="Whether to run training (train/val) or just test evaluation.",
+    )
 
     return parser.parse_args()
 
@@ -72,134 +78,135 @@ def main():
     lr = config["training"]["learning_rate"]
     weight_decay = config["training"].get("weight_decay", 0.0)
     seed = config["training"].get("seed", 42)
+    training_mode = args.training
 
-    # get parameters related to model
+    # model selection (name corresponds to a class under models/)
     model_section = config["model"]
-    model_name = model_section.get("model_name")  # model used to predict sentiment
-    text_model = model_section.get("text_model")  # model used to process text data and generate tokens
-    vision_model = model_section.get("vision_model")  # model used to process image data
+    model_key = model_section.get("name")
     max_length = model_section.get("max_length", 128)
 
-    # get parameters related to data
-    data_cfg = config["data"]
-    train_csv = data_cfg["train_csv"]
-    val_csv = data_cfg["val_csv"]
-    test_csv = data_cfg.get("test_csv")
-    target = data_cfg.get("target", "text")  # the label we want to predict, could be text (default), image, or combined
+    target_by_model = {"text_only": "text", "image_only": "image", "multimodal": "combined"}
+    if model_key not in target_by_model:
+        raise ValueError(f"model.name must be one of {list(target_by_model)}, got {model_key}")
+    target = target_by_model[model_key]
 
-    # get parameters related logging: 
-    out_cfg = config.get("logging", {})
-    output_dir = out_cfg.get("output_dir", str((PROJECT_ROOT / "outputs" / "checkpoints" / "text").resolve()))
-    
-    # set random seed 
+    # set random seed
     set_seed(seed)
 
-    # load dataset 
-    ds = load_dataset(
-            "csv", data_files={"train": train_csv, "validation": val_csv, **({"test": test_csv} if test_csv else {})}
-        )
-    
-    # Decide which label column to use
-    target_map = {
-        "text": "text_label", 
-        "image": "image_label", 
-        "combined": "combined_label"
-        }
-    label_column = target_map.get(target, target)
+    # Build preprocessors based on modality
+    tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_ID, use_fast=False) if target in ("text", "combined") else None
+    image_processor = AutoImageProcessor.from_pretrained(VISION_MODEL_ID) if target in ("image", "combined") else None
 
-    if label_column not in ds["train"].column_names:
-        raise KeyError(f"Label column '{label_column}' not found in CSV columns: {ds['train'].column_names}")
+    # Build datasets (hardcoded split paths)
+    train_ds = MVSA_MV(
+        csv_path=TRAIN_CSV,
+        target=target,
+        max_len=max_length,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+    )
+    label2id = train_ds.label2id
 
-    
+    val_ds = MVSA_MV(
+        csv_path=VAL_CSV,
+        target=target,
+        max_len=max_length,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        label2id=label2id,
+    )
+    test_ds = MVSA_MV(
+        csv_path=TEST_CSV,
+        target=target,
+        max_len=max_length,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        label2id=label2id,
+    )
+
+    num_labels = len(label2id)
+
+    # Instantiate model
+    if model_key == "text_only":
+        model = TextClassifier(num_labels=num_labels)
+        tokenizer = model.tokenizer
+    elif model_key == "image_only":
+        model = ImageClassifier(num_labels=num_labels)
+        image_processor = model.processor
+    else:
+        model = MultimodalClassifier(num_labels=num_labels)
+        tokenizer = model.tokenizer
+        image_processor = model.image_processor
 
 
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else: 
+        device = torch.device("cpu") 
+    model.to(device)
 
-    # different training loops for text only, image only, or combined 
-    # for prediction based on text or image, use Hugging Face modules to finetune the model
+    def to_device(batch):
+        return {k: v.to(device) for k, v in batch.items()}
 
-    
-    if target == 'combined':
-        raise NotImplementedError(
-            "Multimodal training from main.py not implemented yet. "
-            "Provide only 'model_name' in config to run text-only training, "
-            "or extend main.py to use your MVSA_MV dataset and model."
-        )
+    def run_epoch(loader, train: bool):
+        model.train(mode=train)
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        optimizer.zero_grad(set_to_none=True) if train else None
 
+        for batch in loader:
+            batch = to_device(batch)
+            with torch.set_grad_enabled(train):
+                outputs = model(**batch)
+                logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+                loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+                if loss is None:
+                    loss = torch.nn.functional.cross_entropy(logits, batch["labels"])
 
-    # training loop for text only models. 
-    if target == 'text': 
-        ds = ds.map(load_text_from_path)
-        text_source_col = "text"
+                if train:
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
-        # Build consistent label mapping from train split
-        labels = sorted(set(ds["train"][label_column]))
-        label2id = {l: i for i, l in enumerate(labels)}
-        id2label = {i: l for l, i in label2id.items()}
+            preds = logits.argmax(dim=-1)
+            total_correct += (preds == batch["labels"]).sum().item()
+            total_samples += preds.size(0)
+            total_loss += loss.item() * preds.size(0)
 
-        ds = ds.map(build_add_label_id(label_column, label2id))
-        tok = AutoTokenizer.from_pretrained(model_name)
+        avg_loss = total_loss / max(total_samples, 1)
+        acc = total_correct / max(total_samples, 1)
+        return avg_loss, acc
 
-        def preprocess(batch):
-            return tok(batch[text_source_col], truncation=True, padding="max_length", max_length=max_length)
+    # DataLoaders
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
-        ds = ds.map(preprocess, batched=True)
+    # Optimizer on trainable params only
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr,
+        weight_decay=weight_decay,
+    )
 
-        # Keep only the required columns for the model
-        keep = {"input_ids", "attention_mask", "labels"}
-        if "token_type_ids" in ds["train"].features:
-            keep.add("token_type_ids")
-        ds = ds.remove_columns([c for c in ds["train"].column_names if c not in keep])
+    if training_mode:
+        print(f"Training {model_key} on {target} labels...")
+        for epoch in range(num_epochs):
+            train_loss, train_acc = run_epoch(train_loader, train=True)
+            val_loss, val_acc = run_epoch(val_loader, train=False)
+            print(
+                f"Epoch {epoch + 1}/{num_epochs} | "
+                f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
+                f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
+            )
+    else:
+        print(f"Evaluating {model_key} on test split...")
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            model_name, num_labels=len(labels), id2label=id2label, label2id=label2id
-        )
-
-        # Freeze everything first
-        for p in model.parameters():
-            p.requires_grad = False
-
-        # Unfreeze classifier head
-        for p in model.classifier.parameters():
-            p.requires_grad = True
-
-        # Optionally unfreeze last N encoder layers
-        # N = 2
-        # for layer in model.bert.encoder.layer[-N:]:
-        #     for p in layer.parameters():
-        #         p.requires_grad = True
-
-        compute_metrics = build_compute_metrics(average="macro")
-
-        args = TrainingArguments(
-            output_dir=output_dir,
-            learning_rate=lr,
-            per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
-            num_train_epochs=num_epochs,
-            eval_strategy="epoch",
-            save_strategy="epoch",
-            load_best_model_at_end=True,
-            metric_for_best_model="f1",
-            weight_decay=weight_decay,
-            report_to="none",
-            seed=seed,
-        )
-
-        trainer = Trainer(
-            model=model,
-            args=args,
-            train_dataset=ds["train"],
-            eval_dataset=ds.get("validation"),
-            tokenizer=tok,
-            compute_metrics=compute_metrics,
-        )
-
-        trainer.train()
-
-        # Save label map for inference
-        os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, "label_map.json"), "w") as f:
-            json.dump({"label2id": label2id, "id2label": id2label}, f)
+    test_loss, test_acc = run_epoch(test_loader, train=False)
+    print(f"Test loss={test_loss:.4f} test_acc={test_acc:.4f}")
 
 
 if __name__ == "__main__":

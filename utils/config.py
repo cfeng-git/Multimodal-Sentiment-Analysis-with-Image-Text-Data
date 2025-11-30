@@ -58,36 +58,16 @@ def _ensure_keys(d: Dict[str, Any], required: Dict[str, Any], ctx: str) -> None:
 
 
 def validate_config(cfg: Dict[str, Any]) -> None:
-    """Basic schema validation and path normalization.
-
-    Required sections and keys:
-      data: train_csv, val_csv
-      training: batch_size, num_epochs, learning_rate
-      model: one of {model_name} for text-only or {text_model, vision_model} for multimodal
-    """
+    """Basic schema validation and type coercion."""
     required = {
-        "data": {"train_csv": None, "val_csv": None},
         "training": {"batch_size": None, "num_epochs": None, "learning_rate": None},
-        "model": {},
+        "model": {"name": None},
     }
     _ensure_keys(cfg, required, "root")
 
-    model = cfg.get("model", {})
-    has_text_only = "model_name" in model
-    has_mm = "text_model" in model and "vision_model" in model
-    if not (has_text_only or has_mm):
-        raise KeyError(
-            "model section must contain either 'model_name' (text) or both 'text_model' and 'vision_model' (multimodal)."
-        )
-
-    # Normalize data paths relative to project root
-    data = cfg["data"]
-    for key in ("train_csv", "val_csv", "test_csv"):
-        if key in data and isinstance(data[key], str):
-            data[key] = str((PROJECT_ROOT / data[key]).resolve())
-
     # Coerce common training types (handles quoted YAML values like "2e-5")
     tr = cfg.get("training", {})
+
     def _coerce(key: str, typ):
         if key in tr and tr[key] is not None:
             try:
@@ -101,7 +81,6 @@ def validate_config(cfg: Dict[str, Any]) -> None:
     _coerce("num_epochs", int)
     _coerce("seed", int)
 
-    # Coerce model.max_length if present
     model = cfg.get("model", {})
     if "max_length" in model and model["max_length"] is not None:
         try:

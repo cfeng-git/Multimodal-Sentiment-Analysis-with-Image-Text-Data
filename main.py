@@ -10,7 +10,7 @@ from models.image_only import ImageClassifier
 from models.multimodal import MultimodalClassifier
 from models.text_only import TextClassifier
 from utils.config import load_config, merge_config_and_args, validate_config
-
+from tqdm.auto import tqdm 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_SPLIT_DIR = PROJECT_ROOT / "data" / "MVSA" / "splits"
@@ -106,6 +106,7 @@ def main():
         image_processor=image_processor,
     )
     label2id = train_ds.label2id
+    id2label = {i: l for l, i in label2id.items()}
 
     val_ds = MVSA_MV(
         csv_path=VAL_CSV,
@@ -131,7 +132,7 @@ def main():
         model = TextClassifier(num_labels=num_labels)
         tokenizer = model.tokenizer
     elif model_key == "image_only":
-        model = ImageClassifier(num_labels=num_labels)
+        model = ImageClassifier(num_labels=num_labels, label2id=label2id, id2label=id2label)
         image_processor = model.processor
     else:
         model = MultimodalClassifier(num_labels=num_labels)
@@ -152,12 +153,13 @@ def main():
 
     def run_epoch(loader, train: bool):
         model.train(mode=train)
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
-        optimizer.zero_grad(set_to_none=True) if train else None
+        total_loss = total_correct = total_samples = 0
+        iterator = tqdm(loader, desc="train" if train else "eval", leave=False)
 
-        for batch in loader:
+        if train:
+            optimizer.zero_grad(set_to_none=True)
+
+        for batch in iterator:
             batch = to_device(batch)
             with torch.set_grad_enabled(train):
                 outputs = model(**batch)
@@ -165,7 +167,6 @@ def main():
                 loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
                 if loss is None:
                     loss = torch.nn.functional.cross_entropy(logits, batch["labels"])
-
                 if train:
                     loss.backward()
                     optimizer.step()
@@ -176,9 +177,11 @@ def main():
             total_samples += preds.size(0)
             total_loss += loss.item() * preds.size(0)
 
-        avg_loss = total_loss / max(total_samples, 1)
-        acc = total_correct / max(total_samples, 1)
-        return avg_loss, acc
+            avg_loss = total_loss / max(total_samples, 1)
+            acc = total_correct / max(total_samples, 1)
+            iterator.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.4f}")
+
+        return total_loss / max(total_samples, 1), total_correct / max(total_samples, 1)
 
     # DataLoaders
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)

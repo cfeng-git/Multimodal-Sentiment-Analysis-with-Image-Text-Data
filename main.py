@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, default_collate
 from transformers import AutoImageProcessor, AutoTokenizer, set_seed
+from matplotlib import pyplot as plt
 
 from data.mvsa_mv import MVSA_MV
 from models.image_only import ImageClassifier
@@ -49,11 +50,33 @@ def parse_args():
         default=True,
         help="Whether to run training (train/val) or just test evaluation.",
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Optional path to a model state_dict to load before training/eval.",
+    )
 
     return parser.parse_args()
 
 
-
+def plot_history(history, num_epochs, save_dir, model_key):
+    epochs_range = range(1, num_epochs + 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    ax1.plot(epochs_range, history["train_loss"], label="train")
+    ax1.plot(epochs_range, history["val_loss"], label="val")
+    ax1.set_title("Loss")
+    ax1.set_xlabel("Epoch")
+    ax1.legend()
+    ax2.plot(epochs_range, history["train_acc"], label="train")
+    ax2.plot(epochs_range, history["val_acc"], label="val")
+    ax2.set_title("Accuracy")
+    ax2.set_xlabel("Epoch")
+    ax2.legend()
+    fig.tight_layout()
+    plot_path = save_dir / f"{model_key}_metrics.png"
+    plt.savefig(plot_path)
+    plt.close(fig)
+    print(f"Saved training curves to {plot_path}")
 
 
 def main():
@@ -139,7 +162,6 @@ def main():
         tokenizer = model.tokenizer
         image_processor = model.image_processor
 
-
     if torch.backends.mps.is_available():
         device = torch.device("mps")
     elif torch.cuda.is_available():
@@ -147,6 +169,18 @@ def main():
     else: 
         device = torch.device("cpu") 
     model.to(device)
+
+    if args.checkpoint:
+        ckpt_path = Path(args.checkpoint)
+        if not ckpt_path.is_absolute():
+            ckpt_path = (PROJECT_ROOT / ckpt_path).resolve()
+        state = torch.load(ckpt_path, map_location=device)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(f"Loaded checkpoint from {ckpt_path}")
+        if missing:
+            print(f"Missing keys: {missing}")
+        if unexpected:
+            print(f"Unexpected keys: {unexpected}")
 
     def to_device(batch):
         return {k: v.to(device) for k, v in batch.items()}
@@ -203,8 +237,14 @@ def main():
         weight_decay=weight_decay,
     )
 
+    save_dir = PROJECT_ROOT / "outputs" / "checkpoints"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    best_path = save_dir / f"{model_key}_best.pt"
+    best_val_acc = -1.0
+
     if training_mode:
         print(f"Training {model_key} on {target} labels...")
+        history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
         for epoch in range(num_epochs):
             train_loss, train_acc = run_epoch(train_loader, train=True)
             val_loss, val_acc = run_epoch(val_loader, train=False)
@@ -213,8 +253,23 @@ def main():
                 f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} | "
                 f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
             )
+            history["train_loss"].append(train_loss)
+            history["train_acc"].append(train_acc)
+            history["val_loss"].append(val_loss)
+            history["val_acc"].append(val_acc)
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(model.state_dict(), best_path)
+                print(f"  Saved new best model to {best_path} (val_acc={val_acc:.4f})")
+        plot_history(history, num_epochs, save_dir, model_key)
     else:
         print(f"Evaluating {model_key} on test split...")
+
+    # Load best checkpoint for final test eval if training was run and an improvement was saved
+    if training_mode and best_path.exists():
+        state = torch.load(best_path, map_location=device)
+        model.load_state_dict(state, strict=False)
+        print(f"Loaded best checkpoint from {best_path} for test evaluation.")
 
     test_loss, test_acc = run_epoch(test_loader, train=False)
     print(f"Test loss={test_loss:.4f} test_acc={test_acc:.4f}")

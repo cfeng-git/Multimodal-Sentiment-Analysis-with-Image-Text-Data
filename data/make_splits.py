@@ -1,16 +1,29 @@
-
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-df = pd.read_csv(ROOT / "data" / "MVSA" / "MVSA.csv")
+
+mvsa_path = ROOT / "data" / "MVSA" / "MVSA.csv"
+labels_path = ROOT / "data" / "MVSA" / "labels_master.csv"
+
+# load full MVSA metadata; keep only paths to avoid duplicate label columns
+mvsa = pd.read_csv(mvsa_path)[["id", "text_path", "image_path"]]
+
+# load curated labels (id, text_label, image_label, combined_label)
+labels = pd.read_csv(labels_path)
+
+# keep only rows whose id appears in labels_master and attach all three labels
+df = mvsa.merge(
+    labels[["id", "text_label", "image_label", "combined_label"]],
+    on="id",
+    how="inner",
+)
 
 # drop rows with missing files (just in case)
 df = df[df["text_path"].notna() & df["image_path"].notna()]
 
-# choose the target for this split
-TARGET = "text_label"   # change to "image_label" if training on images
+# choose the target for this split: "text_label", "image_label", or "combined_label"
 TARGET = "image_label"
 
 

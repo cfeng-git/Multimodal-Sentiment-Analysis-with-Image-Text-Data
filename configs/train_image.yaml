@@ -1,10 +1,13 @@
 training:
   batch_size: 32
-  num_epochs: 6
-  learning_rate: 1e-4
-  weight_decay: 0.01
+  num_epochs: 10
+  learning_rate: 1e-5
+  head_learning_rate: 1e-4   # classifier
+  backbone_learning_rate: 8e-6
+  weight_decay: 0.05
   seed: 42
 
 model:
   name: image_only   # options: text_only, image_only, multimodal
   max_length: 256
+  unfreeze_last_layers: 2

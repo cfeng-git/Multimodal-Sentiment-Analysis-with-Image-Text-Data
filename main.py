@@ -98,7 +98,17 @@ def main():
     # get parameters related to training
     batch_size = config["training"]["batch_size"]
     num_epochs = config["training"]["num_epochs"]
-    lr = config["training"]["learning_rate"]
+    def _to_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"Learning rate values must be numeric, got {val!r}")
+
+    lr = _to_float(config["training"]["learning_rate"])
+    head_lr = _to_float(config["training"].get("head_learning_rate"))
+    backbone_lr = _to_float(config["training"].get("backbone_learning_rate"))
     weight_decay = config["training"].get("weight_decay", 0.0)
     seed = config["training"].get("seed", 42)
     training_mode = args.training
@@ -155,7 +165,13 @@ def main():
         model = TextClassifier(num_labels=num_labels)
         tokenizer = model.tokenizer
     elif model_key == "image_only":
-        model = ImageClassifier(num_labels=num_labels, label2id=label2id, id2label=id2label)
+        unfreeze_last_layers = model_section.get("unfreeze_last_layers", 0)
+        model = ImageClassifier(
+            num_labels=num_labels,
+            label2id=label2id,
+            id2label=id2label,
+            unfreeze_last_layers=unfreeze_last_layers,
+        )
         image_processor = model.processor
     else:
         model = MultimodalClassifier(num_labels=num_labels)
@@ -230,12 +246,19 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=safe_collate)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=safe_collate)
 
-    # Optimizer on trainable params only
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=lr,
-        weight_decay=weight_decay,
-    )
+    # Optimizer with optional per-group learning rates (e.g., classifier vs unfrozen backbone)
+    trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    if head_lr or backbone_lr:
+        head_params = [p for n, p in trainable if "classifier" in n]
+        backbone_params = [p for n, p in trainable if "classifier" not in n]
+        param_groups = []
+        if head_params:
+            param_groups.append({"params": head_params, "lr": head_lr or lr})
+        if backbone_params:
+            param_groups.append({"params": backbone_params, "lr": backbone_lr or lr})
+        optimizer = torch.optim.AdamW(param_groups, lr=lr, weight_decay=weight_decay)
+    else:
+        optimizer = torch.optim.AdamW([p for _, p in trainable], lr=lr, weight_decay=weight_decay)
 
     save_dir = PROJECT_ROOT / "outputs" / "checkpoints"
     save_dir.mkdir(parents=True, exist_ok=True)

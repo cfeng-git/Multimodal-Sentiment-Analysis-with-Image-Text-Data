@@ -1,10 +1,10 @@
 training:
   batch_size: 32
-  num_epochs: 2
-  learning_rate: 2e-5
+  num_epochs: 20
+  learning_rate: 1e-4
   weight_decay: 0.01
   seed: 42
 
 model:
-  name: image_only   # options: text_only, image_only, multimodal
+  name: text_only   # options: text_only, image_only, multimodal
   max_length: 256

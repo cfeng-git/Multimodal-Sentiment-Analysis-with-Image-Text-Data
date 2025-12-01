@@ -7,4 +7,5 @@ training:
 
 model:
   name: image_only   # options: text_only, image_only, multimodal
+  image_model_id: google/vit-base-patch16-224
   max_length: 256

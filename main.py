@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader, default_collate
 from transformers import AutoImageProcessor, AutoTokenizer, set_seed
 from matplotlib import pyplot as plt
-
+import pandas as pd 
 from data.mvsa_mv import MVSA_MV
 from models.image_only import ImageClassifier
 from models.multimodal import MultimodalClassifier
@@ -18,8 +18,8 @@ DATA_SPLIT_DIR = PROJECT_ROOT / "data" / "MVSA" / "splits"
 TRAIN_CSV = DATA_SPLIT_DIR / "train.csv"
 VAL_CSV = DATA_SPLIT_DIR / "valid.csv"
 TEST_CSV = DATA_SPLIT_DIR / "test.csv"
-TEXT_MODEL_ID = "vinai/bertweet-base"
-VISION_MODEL_ID = "google/vit-base-patch16-224"
+# TEXT_MODEL_ID = "vinai/bertweet-base"
+# VISION_MODEL_ID = "google/vit-base-patch16-224"
 
 
 
@@ -112,13 +112,43 @@ def main():
     if model_key not in target_by_model:
         raise ValueError(f"model.name must be one of {list(target_by_model)}, got {model_key}")
     target = target_by_model[model_key]
+    target_col_map = {"text": "text_label", "image": "image_label", "combined": "combined_label"}
+    target_col = target_col_map[target]
+    train_df = pd.read_csv(TRAIN_CSV)
+    labels = sorted(train_df[target_col].dropna().unique())
+    label2id = {l: i for i, l in enumerate(labels)}
+    id2label = {i: l for l, i in label2id.items()}
+    num_labels = len(label2id)
+
+    # try to get text_model_id and vision_model_id, otherwise use the default ones 
+    text_model_id = config["model"].get("text_model_id", "vinai/bertweet-base")
+    vision_model_id = config["model"].get("vision_model_id", "google/vit-base-patch16-224")
 
     # set random seed
     set_seed(seed)
 
-    # Build preprocessors based on modality
-    tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_ID, use_fast=False) if target in ("text", "combined") else None
-    image_processor = AutoImageProcessor.from_pretrained(VISION_MODEL_ID) if target in ("image", "combined") else None
+
+
+    # build model first
+
+    
+
+    if model_key == "text_only":
+        model = TextClassifier(num_labels=num_labels, model_name=text_model_id)
+        tokenizer = model.tokenizer
+        image_processor = None
+    elif model_key == "image_only":
+        model = ImageClassifier(num_labels=num_labels, label2id=label2id, id2label=id2label, model_name=vision_model_id)
+        tokenizer = None
+        image_processor = model.processor
+    else:
+        model = MultimodalClassifier(num_labels=num_labels, text_model_name=text_model_id, vision_model_name=vision_model_id)
+        tokenizer = model.tokenizer
+        image_processor = model.image_processor
+
+    # # Build preprocessors based on modality
+    # tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL_ID, use_fast=False) if target in ("text", "combined") else None
+    # image_processor = AutoImageProcessor.from_pretrained(VISION_MODEL_ID) if target in ("image", "combined") else None
 
     # Build datasets (hardcoded split paths)
     train_ds = MVSA_MV(
@@ -128,9 +158,7 @@ def main():
         tokenizer=tokenizer,
         image_processor=image_processor,
     )
-    label2id = train_ds.label2id
-    id2label = {i: l for l, i in label2id.items()}
-
+    
     val_ds = MVSA_MV(
         csv_path=VAL_CSV,
         target=target,
@@ -148,19 +176,19 @@ def main():
         label2id=label2id,
     )
 
-    num_labels = len(label2id)
+    
 
-    # Instantiate model
-    if model_key == "text_only":
-        model = TextClassifier(num_labels=num_labels)
-        tokenizer = model.tokenizer
-    elif model_key == "image_only":
-        model = ImageClassifier(num_labels=num_labels, label2id=label2id, id2label=id2label)
-        image_processor = model.processor
-    else:
-        model = MultimodalClassifier(num_labels=num_labels)
-        tokenizer = model.tokenizer
-        image_processor = model.image_processor
+    # # Instantiate model
+    # if model_key == "text_only":
+    #     model = TextClassifier(num_labels=num_labels)
+    #     tokenizer = model.tokenizer
+    # elif model_key == "image_only":
+    #     model = ImageClassifier(num_labels=num_labels, label2id=label2id, id2label=id2label)
+    #     image_processor = model.processor
+    # else:
+    #     model = MultimodalClassifier(num_labels=num_labels)
+    #     tokenizer = model.tokenizer
+    #     image_processor = model.image_processor
 
     if torch.backends.mps.is_available():
         device = torch.device("mps")

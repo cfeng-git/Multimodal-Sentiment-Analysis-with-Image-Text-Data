@@ -7,4 +7,5 @@ training:
 
 model:
   name: text_only   # options: text_only, image_only, multimodal
+  text_model_id: vinai/bertweet-base
   max_length: 256

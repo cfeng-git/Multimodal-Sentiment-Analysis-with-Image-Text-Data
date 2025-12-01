@@ -7,4 +7,6 @@ training:
 
 model:
   name: multimodal   # options: text_only, image_only, multimodal
+  text_model_id: vinai/bertweet-base
+  image_model_id: google/vit-base-patch16-224
   max_length: 256
